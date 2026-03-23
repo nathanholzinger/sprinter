@@ -69,6 +69,13 @@ function loopRelEndOf(typicalDayEnd, typicalDayStart, loopDayStart) {
   return rel === 0 ? 24 : rel;
 }
 
+/** Returns the dayNames a span event covers, in loop order. */
+function getSpanDayNames(event, loopDays) {
+  const startIdx = loopDays.findIndex((d) => d.dayName === event.startDay);
+  const endIdx   = loopDays.findIndex((d) => d.dayName === event.endDay);
+  return loopDays.slice(startIdx, endIdx + 1).map((d) => d.dayName);
+}
+
 function formatClockHour(clockH) {
   const h = ((clockH % 24) + 24) % 24;
   if (h === 0) return '12 AM';
@@ -147,52 +154,73 @@ export default function TemplateEditor({ templateId, onBack }) {
     const cards = [];
 
     for (const event of template.events) {
-      if (!event.days.includes(loopDay.dayName)) continue;
+      const eventType = event.type ?? 'recurring';
 
-      const startLoopRel = clockToLoopRelMins(timeStrToMins(event.startTime));
-      let endLoopRel     = clockToLoopRelMins(timeStrToMins(event.endTime));
+      if (eventType === 'recurring') {
+        if (!event.days.includes(loopDay.dayName)) continue;
 
-      // Overnight: if end ≤ start in loop-relative space, the event wraps into
-      // the next loop day — shift end forward by a full day.
-      if (endLoopRel <= startLoopRel) {
-        endLoopRel += 24 * 60;
-      }
+        const startLoopRel = clockToLoopRelMins(timeStrToMins(event.startTime));
+        let endLoopRel     = clockToLoopRelMins(timeStrToMins(event.endTime));
 
-      const crossesBoundary = startLoopRel < 24 * 60 && endLoopRel > 24 * 60;
+        // Overnight: if end ≤ start in loop-relative space, the event wraps into
+        // the next loop day — shift end forward by a full day.
+        if (endLoopRel <= startLoopRel) {
+          endLoopRel += 24 * 60;
+        }
 
-      if (crossesBoundary) {
-        const boundaryTimeStr = minsToTimeStr(loopDayStart * 60);
-        const nextIdx = (loopDayIdx + 1) % 7;
+        const crossesBoundary = startLoopRel < 24 * 60 && endLoopRel > 24 * 60;
 
-        // Card 1 — this column, up to the loop boundary
+        if (crossesBoundary) {
+          const boundaryTimeStr = minsToTimeStr(loopDayStart * 60);
+          const nextIdx = (loopDayIdx + 1) % 7;
+
+          cards.push({
+            event, loopDayIdx, startLoopRel, endLoopRel: 24 * 60,
+            segmentStart: event.startTime, segmentEnd: boundaryTimeStr, splitPart: 1,
+          });
+          cards.push({
+            event, loopDayIdx: nextIdx, startLoopRel: 0, endLoopRel: endLoopRel - 24 * 60,
+            segmentStart: boundaryTimeStr, segmentEnd: event.endTime, splitPart: 2,
+          });
+        } else {
+          cards.push({
+            event, loopDayIdx, startLoopRel, endLoopRel,
+            segmentStart: undefined, segmentEnd: undefined, splitPart: 0,
+          });
+        }
+
+      } else if (eventType === 'span') {
+        const spanDays = getSpanDayNames(event, loopDays);
+        if (!spanDays.includes(loopDay.dayName)) continue;
+
+        const isSameDay  = event.startDay === event.endDay;
+        const isStartDay = loopDay.dayName === event.startDay;
+        const isEndDay   = loopDay.dayName === event.endDay;
+        const startLoopRel  = clockToLoopRelMins(timeStrToMins(event.startTime));
+        const endLoopRelRaw = clockToLoopRelMins(timeStrToMins(event.endTime));
+
+        let cardStartRel, cardEndRel, segStart, segEnd;
+
+        if (isSameDay) {
+          cardStartRel = startLoopRel;
+          cardEndRel   = endLoopRelRaw <= startLoopRel ? endLoopRelRaw + 24 * 60 : endLoopRelRaw;
+          segStart = undefined; segEnd = undefined;
+        } else if (isStartDay) {
+          cardStartRel = startLoopRel; cardEndRel = 24 * 60;
+          segStart = event.startTime; segEnd = minsToTimeStr(loopDayStart * 60);
+        } else if (isEndDay) {
+          cardStartRel = 0; cardEndRel = endLoopRelRaw;
+          segStart = minsToTimeStr(loopDayStart * 60); segEnd = event.endTime;
+        } else {
+          // Middle day — full column
+          cardStartRel = 0; cardEndRel = 24 * 60;
+          segStart = undefined; segEnd = undefined;
+        }
+
         cards.push({
-          event,
-          loopDayIdx,
-          startLoopRel,
-          endLoopRel: 24 * 60,
-          segmentStart: event.startTime,
-          segmentEnd: boundaryTimeStr,
-          splitPart: 1,
-        });
-
-        // Card 2 — next column, from the loop boundary onward
-        cards.push({
-          event,
-          loopDayIdx: nextIdx,
-          startLoopRel: 0,
-          endLoopRel: endLoopRel - 24 * 60,
-          segmentStart: boundaryTimeStr,
-          segmentEnd: event.endTime,
-          splitPart: 2,
-        });
-      } else {
-        cards.push({
-          event,
-          loopDayIdx,
-          startLoopRel,
-          endLoopRel,
-          segmentStart: undefined,
-          segmentEnd: undefined,
+          event, loopDayIdx,
+          startLoopRel: cardStartRel, endLoopRel: cardEndRel,
+          segmentStart: segStart, segmentEnd: segEnd,
           splitPart: 0,
         });
       }
@@ -202,18 +230,10 @@ export default function TemplateEditor({ templateId, onBack }) {
   }
 
   // Distribute all cards into per-column buckets.
-  // Split part-2 cards are routed directly to their target column (next loop day)
-  // when we encounter them during the source column's iteration.
   const cardsByLoopDay = Array.from({ length: 7 }, () => []);
   for (const loopDay of loopDays) {
-    const srcIdx = loopDays.indexOf(loopDay);
     for (const card of getCardsForLoopDay(loopDay)) {
-      // Part-1 and unsplit cards belong to the source column.
-      // Part-2 cards belong to card.loopDayIdx (the next column); add them now
-      // so we don't process them again when we reach that column.
-      if (card.loopDayIdx === srcIdx || card.splitPart === 2) {
-        cardsByLoopDay[card.loopDayIdx].push(card);
-      }
+      cardsByLoopDay[card.loopDayIdx].push(card);
     }
   }
 
@@ -437,6 +457,7 @@ export default function TemplateEditor({ templateId, onBack }) {
         <EventForm
           initialEvent={formState.id ? formState : null}
           defaultDay={formState.defaultDay ?? formState.days?.[0] ?? loopDays[0].dayName}
+          loopDays={loopDays}
           onSave={handleSave}
           onClose={() => setFormState(null)}
         />

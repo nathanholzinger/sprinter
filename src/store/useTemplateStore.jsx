@@ -113,9 +113,24 @@ export function createTemplate(name) {
 export function createEvent(overrides = {}) {
   return {
     id: crypto.randomUUID(),
+    type: 'recurring',
     title: '',
     days: ['monday'],
     startTime: '09:00',
+    endTime: '10:00',
+    notes: '',
+    ...overrides,
+  };
+}
+
+export function createSpanEvent(overrides = {}) {
+  return {
+    id: crypto.randomUUID(),
+    type: 'span',
+    title: '',
+    startDay: 'monday',
+    startTime: '09:00',
+    endDay: 'monday',
     endTime: '10:00',
     notes: '',
     ...overrides,
