@@ -1,139 +1,22 @@
-import { useState, useRef, useEffect, useLayoutEffect, Fragment } from 'react';
+import { useState, Fragment } from 'react';
 import Button from '../ui/Button';
 import Modal from '../ui/Modal';
 import EventCard from '../events/EventCard';
 import EventForm from '../events/EventForm';
+import SettingsModal from './SettingsModal';
 import { useTemplateStore } from '../../store/useTemplateStore';
-
-const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'];
-const DAY_LABELS = {
-  monday: 'Mon', tuesday: 'Tue', wednesday: 'Wed',
-  thursday: 'Thu', friday: 'Fri', saturday: 'Sat', sunday: 'Sun',
-};
+import {
+  DAY_LABELS,
+  timeStrToMins, minsToTimeStr,
+  computeLoopDayStart, buildLoopDays,
+  loopRelHoursOf, loopRelEndOf,
+  getSpanDayNames, computeOverlapLayout,
+  formatClockHour,
+} from '../../lib/calendarUtils';
+import { useDragToCreate } from '../../hooks/useDragToCreate';
 
 const MIN_EVENT_HEIGHT = 24; // px
 const EXPAND_STEP = 2;       // hours per expand click
-
-// ─── Pure helpers (no component state) ───────────────────────────────────────
-
-function timeStrToMins(timeStr) {
-  const [h, m] = timeStr.split(':').map(Number);
-  return h * 60 + m;
-}
-
-function minsToTimeStr(totalMins) {
-  const h = Math.floor(totalMins / 60) % 24;
-  const m = totalMins % 60;
-  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
-}
-
-/**
- * Derive loopDayStart (clock hour 0–23).
- * Look LEFT from typicalDayStart; pick whichever is closer: midnight or typicalDayEnd.
- * Midnight wins on tie.
- */
-function computeLoopDayStart(typicalDayStart, typicalDayEnd) {
-  const distMidnight = typicalDayStart;
-  const distEnd =
-    typicalDayEnd < typicalDayStart
-      ? typicalDayStart - typicalDayEnd
-      : typicalDayStart + (24 - typicalDayEnd);
-  return distMidnight <= distEnd ? 0 : typicalDayEnd;
-}
-
-/**
- * Build the ordered loop-day array.
- * loopDay[0] starts on loopWeekStart and each subsequent day follows in week order.
- * Returns [{ dayNumber: 1, dayName: 'monday' }, ...]
- */
-function buildLoopDays(loopWeekStart) {
-  const startIdx = DAYS.indexOf(loopWeekStart);
-  return Array.from({ length: 7 }, (_, i) => ({
-    dayNumber: i + 1,
-    dayName: DAYS[(startIdx + i) % 7],
-  }));
-}
-
-/** Convert a clock hour to loop-relative hours (0–23, where 0 = loopDayStart). */
-function loopRelHoursOf(clockHour, loopDayStart) {
-  return ((clockHour - loopDayStart) + 24) % 24;
-}
-
-/**
- * Convert typicalDayEnd to loop-relative hours for use as displayEnd.
- * Returns 24 when typicalDayEnd equals loopDayStart (full loop day).
- */
-function loopRelEndOf(typicalDayEnd, typicalDayStart, loopDayStart) {
-  if (typicalDayEnd === typicalDayStart) return 24;
-  const rel = loopRelHoursOf(typicalDayEnd, loopDayStart);
-  return rel === 0 ? 24 : rel;
-}
-
-/** Returns the dayNames a span event covers, in loop order. */
-function getSpanDayNames(event, loopDays) {
-  const startIdx = loopDays.findIndex((d) => d.dayName === event.startDay);
-  const endIdx   = loopDays.findIndex((d) => d.dayName === event.endDay);
-  return loopDays.slice(startIdx, endIdx + 1).map((d) => d.dayName);
-}
-
-/**
- * Assign colIdx and numCols to each card for side-by-side overlap rendering.
- * Mutates cards in-place; safe because cards are freshly created each render.
- */
-function computeOverlapLayout(cards) {
-  if (cards.length === 0) return cards;
-
-  cards.sort((a, b) =>
-    a.startLoopRel !== b.startLoopRel
-      ? a.startLoopRel - b.startLoopRel
-      : a.endLoopRel - b.endLoopRel
-  );
-
-  const clusters = [];
-  let current = [];
-  let maxEnd = -Infinity;
-
-  for (const card of cards) {
-    if (current.length > 0 && card.startLoopRel >= maxEnd) {
-      clusters.push(current);
-      current = [];
-      maxEnd = -Infinity;
-    }
-    current.push(card);
-    if (card.endLoopRel > maxEnd) maxEnd = card.endLoopRel;
-  }
-  if (current.length > 0) clusters.push(current);
-
-  for (const cluster of clusters) {
-    const laneEnds = [];
-    for (const card of cluster) {
-      let placed = false;
-      for (let i = 0; i < laneEnds.length; i++) {
-        if (laneEnds[i] <= card.startLoopRel) {
-          card.colIdx = i;
-          laneEnds[i] = card.endLoopRel;
-          placed = true;
-          break;
-        }
-      }
-      if (!placed) {
-        card.colIdx = laneEnds.length;
-        laneEnds.push(card.endLoopRel);
-      }
-    }
-    const numCols = laneEnds.length;
-    for (const card of cluster) card.numCols = numCols;
-  }
-
-  return cards;
-}
-
-function formatClockHour(clockH) {
-  const h = ((clockH % 24) + 24) % 24;
-  if (h === 0) return '12 AM';
-  if (h === 12) return '12 PM';
-  return h < 12 ? `${h} AM` : `${h - 12} PM`;
-}
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -158,116 +41,15 @@ export default function TemplateEditor({ templateId, onBack }) {
   const [pendingDelete, setPendingDelete] = useState(null); // { event, day } | null
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // ── Drag-to-create ───────────────────────────────────────────────────────
-  const dragAnchorRef  = useRef(null); // { loopDayIdx, loopRelMins, startClientX, startClientY }
-  const dragPreviewRef = useRef(null); // normalised { startDayIdx, startLoopRelMins, endDayIdx, endLoopRelMins }
-  const [dragPreview, setDragPreview] = useState(null);
-
-  // Always-fresh render-time values for the stable useEffect closure
-  const dragCtx = useRef({});
-
-  useEffect(() => {
-    const THRESHOLD = 8; // px before drag activates
-
-    function colRelMins(clientY, colEl, ctx) {
-      const rect = colEl.getBoundingClientRect();
-      return ctx.displayStart * 60 + Math.max(0, Math.min(clientY - rect.top, ctx.totalHeight));
-    }
-
-    function onMouseMove(e) {
-      if (!dragAnchorRef.current) return;
-      const anchor = dragAnchorRef.current;
-      const dy = e.clientY - anchor.startClientY;
-      const dx = e.clientX - anchor.startClientX;
-      if (!dragPreviewRef.current && Math.abs(dy) < THRESHOLD && Math.abs(dx) < 10) return;
-
-      const ctx = dragCtx.current;
-      const colEl = document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-day-idx]');
-      if (!colEl) return;
-
-      const endDayIdx     = Number(colEl.dataset.dayIdx);
-      const endRelMins    = colRelMins(e.clientY, colEl, ctx);
-      const anchorColEl   = document.querySelector(`[data-day-idx="${anchor.loopDayIdx}"]`);
-      const startRelMins  = anchorColEl ? colRelMins(anchor.startClientY, anchorColEl, ctx) : anchor.loopRelMins;
-
-      // Normalise: start ≤ end (by day index, then by time)
-      let [sDayIdx, sRel, eDayIdx, eRel] = [anchor.loopDayIdx, startRelMins, endDayIdx, endRelMins];
-      if (eDayIdx < sDayIdx || (eDayIdx === sDayIdx && eRel < sRel)) {
-        [sDayIdx, eDayIdx] = [eDayIdx, sDayIdx];
-        [sRel,    eRel]    = [eRel,    sRel];
-      }
-
-      const preview = { startDayIdx: sDayIdx, startLoopRelMins: sRel, endDayIdx: eDayIdx, endLoopRelMins: eRel };
-      dragPreviewRef.current = preview;
-      setDragPreview({ ...preview });
-    }
-
-    function onMouseUp(e) {
-      if (!dragAnchorRef.current) return;
-      const anchor  = dragAnchorRef.current;
-      const preview = dragPreviewRef.current;
-      dragAnchorRef.current  = null;
-      dragPreviewRef.current = null;
-      setDragPreview(null);
-
-      const ctx = dragCtx.current;
-
-      if (!preview) {
-        // Plain click — use anchor position
-        if (e.target.closest('[data-event-card]')) return;
-        const clockMins = (anchor.loopRelMins + ctx.loopDayStart * 60) % (24 * 60);
-        const rounded   = Math.round(clockMins / 15) * 15 % (24 * 60);
-        ctx.setFormState({
-          defaultDay: ctx.loopDays[anchor.loopDayIdx].dayName,
-          startTime:  minsToTimeStr(rounded),
-          endTime:    minsToTimeStr((rounded + 60) % (24 * 60)),
-        });
-        return;
-      }
-
-      const toRounded = (loopRelMins) => {
-        const clockMins = (loopRelMins + ctx.loopDayStart * 60) % (24 * 60);
-        return minsToTimeStr(Math.round(clockMins / 15) * 15 % (24 * 60));
-      };
-      const startTime = toRounded(preview.startLoopRelMins);
-      const endTime   = toRounded(preview.endLoopRelMins);
-
-      if (preview.startDayIdx === preview.endDayIdx) {
-        ctx.setFormState({
-          defaultDay: ctx.loopDays[preview.startDayIdx].dayName,
-          startTime,
-          endTime,
-        });
-      } else {
-        ctx.setFormState({
-          defaultType:         'span',
-          defaultSpanStartDay: ctx.loopDays[preview.startDayIdx].dayName,
-          defaultSpanEndDay:   ctx.loopDays[preview.endDayIdx].dayName,
-          startTime,
-          endTime,
-        });
-      }
-    }
-
-    document.addEventListener('mousemove', onMouseMove);
-    document.addEventListener('mouseup',   onMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup',   onMouseUp);
-    };
-  }, []); // stable — reads live values through dragCtx ref
-  const [settingsForm, setSettingsForm] = useState({ typicalDayStart, typicalDayEnd, loopWeekStart });
-
   // ── Derived display values ─────────────────────────────────────────────────
 
   const totalHeight = (displayEnd - displayStart) * 60; // 1px per minute
   const windowSize  = displayEnd - displayStart;
 
-  // Keep dragCtx fresh after every render (useLayoutEffect avoids the
-  // react-hooks/refs rule that disallows ref writes during render)
-  useLayoutEffect(() => {
-    dragCtx.current = { loopDayStart, loopDays, displayStart, totalHeight, setFormState };
-  }, [loopDayStart, loopDays, displayStart, totalHeight, setFormState]);
+  // ── Drag-to-create ────────────────────────────────────────────────────────
+  const { dragPreview, handleColumnMouseDown } = useDragToCreate({
+    loopDayStart, loopDays, displayStart, totalHeight, setFormState,
+  });
 
   // loop-relative hour → clock hour
   const loopRelToClockHour = (relH) => (relH + loopDayStart) % 24;
@@ -423,26 +205,11 @@ export default function TemplateEditor({ templateId, onBack }) {
     }
   }
 
-  function handleColumnMouseDown(e, colIdx) {
-    if (e.button !== 0) return;
-    if (e.target.closest('[data-event-card]')) return;
-    e.preventDefault(); // prevent text selection during drag
-    const rect = e.currentTarget.getBoundingClientRect();
-    const relY = Math.max(0, Math.min(e.clientY - rect.top, totalHeight));
-    dragAnchorRef.current = {
-      loopDayIdx:   colIdx,
-      loopRelMins:  displayStart * 60 + relY,
-      startClientX: e.clientX,
-      startClientY: e.clientY,
-    };
-  }
-
-  function handleSettingsSave() {
-    dispatch({ type: 'SET_SETTINGS', settings: settingsForm });
-    // Recompute loop-relative display window based on new settings
-    const newLoopDayStart = computeLoopDayStart(settingsForm.typicalDayStart, settingsForm.typicalDayEnd);
-    setDisplayStart(loopRelHoursOf(settingsForm.typicalDayStart, newLoopDayStart));
-    setDisplayEnd(loopRelEndOf(settingsForm.typicalDayEnd, settingsForm.typicalDayStart, newLoopDayStart));
+  function handleSettingsSave(newSettings) {
+    dispatch({ type: 'SET_SETTINGS', settings: newSettings });
+    const newLoopDayStart = computeLoopDayStart(newSettings.typicalDayStart, newSettings.typicalDayEnd);
+    setDisplayStart(loopRelHoursOf(newSettings.typicalDayStart, newLoopDayStart));
+    setDisplayEnd(loopRelEndOf(newSettings.typicalDayEnd, newSettings.typicalDayStart, newLoopDayStart));
     setSettingsOpen(false);
   }
 
@@ -494,7 +261,7 @@ export default function TemplateEditor({ templateId, onBack }) {
         <div className="sticky top-[57px] z-10 flex bg-white border-b border-gray-200">
           <div className="w-14 shrink-0 flex items-center justify-center border-r border-gray-200">
             <button
-              onClick={() => { setSettingsForm({ typicalDayStart, typicalDayEnd, loopWeekStart }); setSettingsOpen(true); }}
+              onClick={() => setSettingsOpen(true)}
               className="rounded-md p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600 transition-colors"
               aria-label="Calendar settings"
               title="Settings"
@@ -714,56 +481,11 @@ export default function TemplateEditor({ templateId, onBack }) {
 
       {/* Settings modal */}
       {settingsOpen && (
-        <Modal title="Calendar settings" onClose={() => setSettingsOpen(false)}>
-          <div className="flex flex-col gap-5">
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Day start</label>
-                <select
-                  value={settingsForm.typicalDayStart}
-                  onChange={(e) => setSettingsForm((p) => ({ ...p, typicalDayStart: Number(e.target.value) }))}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                >
-                  {Array.from({ length: 24 }, (_, i) => i).map((h) => (
-                    <option key={h} value={h}>{formatClockHour(h)}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Day end</label>
-                <select
-                  value={settingsForm.typicalDayEnd}
-                  onChange={(e) => setSettingsForm((p) => ({ ...p, typicalDayEnd: Number(e.target.value) }))}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-                >
-                  {Array.from({ length: 24 }, (_, i) => i).map((h) => (
-                    <option key={h} value={h}>{formatClockHour(h)}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Week starts on</label>
-              <select
-                value={settingsForm.loopWeekStart}
-                onChange={(e) => setSettingsForm((p) => ({ ...p, loopWeekStart: e.target.value }))}
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
-              >
-                {DAYS.map((d) => (
-                  <option key={d} value={d}>{d.charAt(0).toUpperCase() + d.slice(1)}</option>
-                ))}
-              </select>
-            </div>
-            <p className="text-xs text-gray-400 -mt-2">
-              The calendar defaults to {formatClockHour(settingsForm.typicalDayStart)} – {formatClockHour(settingsForm.typicalDayEnd)}.
-              Use expand buttons to reveal hours outside this range.
-            </p>
-            <div className="flex justify-end gap-2">
-              <Button variant="secondary" onClick={() => setSettingsOpen(false)}>Cancel</Button>
-              <Button onClick={handleSettingsSave}>Save</Button>
-            </div>
-          </div>
-        </Modal>
+        <SettingsModal
+          initialValues={{ typicalDayStart, typicalDayEnd, loopWeekStart }}
+          onSave={handleSettingsSave}
+          onClose={() => setSettingsOpen(false)}
+        />
       )}
     </div>
   );
