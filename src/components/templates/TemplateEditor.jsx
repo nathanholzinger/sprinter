@@ -318,9 +318,23 @@ export default function TemplateEditor({ templateId, onBack }) {
     }
   }
 
+  function getTimeFromClickY(e) {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const relY = Math.max(0, Math.min(e.clientY - rect.top, totalHeight));
+    // 1 px = 1 loop-relative minute; convert to clock minutes and round to 15
+    const loopRelMins = displayStart * 60 + relY;
+    const clockMins   = (loopRelMins + loopDayStart * 60) % (24 * 60);
+    const rounded     = Math.round(clockMins / 15) * 15 % (24 * 60);
+    return {
+      startTime: minsToTimeStr(rounded),
+      endTime:   minsToTimeStr((rounded + 60) % (24 * 60)),
+    };
+  }
+
   function handleColumnClick(e, dayName) {
     if (e.target.closest('[data-event-card]')) return;
-    setFormState({ defaultDay: dayName });
+    const { startTime, endTime } = getTimeFromClickY(e);
+    setFormState({ defaultDay: dayName, startTime, endTime });
   }
 
   function handleSettingsSave() {
@@ -533,6 +547,8 @@ export default function TemplateEditor({ templateId, onBack }) {
         <EventForm
           initialEvent={formState.id ? formState : null}
           defaultDay={formState.defaultDay ?? formState.days?.[0] ?? loopDays[0].dayName}
+          defaultStartTime={formState.startTime}
+          defaultEndTime={formState.endTime}
           loopDays={loopDays}
           onSave={handleSave}
           onClose={() => setFormState(null)}

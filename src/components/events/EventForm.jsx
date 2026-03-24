@@ -9,13 +9,17 @@ const DAY_LABELS = {
   thursday: 'Thu', friday: 'Fri', saturday: 'Sat', sunday: 'Sun',
 };
 
-export default function EventForm({ initialEvent, defaultDay, loopDays, onSave, onClose }) {
+export default function EventForm({ initialEvent, defaultDay, defaultStartTime, defaultEndTime, loopDays, onSave, onClose }) {
   const initialType = initialEvent?.type ?? 'recurring';
   const [eventType, setEventType] = useState(initialType);
 
   const [form, setForm] = useState(() => {
     if (initialEvent) return { ...initialEvent };
-    return createEvent({ days: [defaultDay ?? loopDays[0].dayName] });
+    return createEvent({
+      days: [defaultDay ?? loopDays[0].dayName],
+      ...(defaultStartTime && { startTime: defaultStartTime }),
+      ...(defaultEndTime   && { endTime:   defaultEndTime   }),
+    });
   });
 
   function set(field, value) {
