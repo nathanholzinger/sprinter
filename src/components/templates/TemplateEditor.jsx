@@ -155,6 +155,7 @@ export default function TemplateEditor({ templateId, onBack }) {
   );
 
   const [formState, setFormState] = useState(null);
+  const [pendingDelete, setPendingDelete] = useState(null); // { event, day } | null
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsForm, setSettingsForm] = useState({ typicalDayStart, typicalDayEnd, loopWeekStart });
 
@@ -229,15 +230,18 @@ export default function TemplateEditor({ templateId, onBack }) {
           cards.push({
             event, loopDayIdx, startLoopRel, endLoopRel: 24 * 60,
             segmentStart: event.startTime, segmentEnd: boundaryTimeStr, splitPart: 1,
+            leftCount: 0, rightCount: 1,
           });
           cards.push({
             event, loopDayIdx: nextIdx, startLoopRel: 0, endLoopRel: endLoopRel - 24 * 60,
             segmentStart: boundaryTimeStr, segmentEnd: event.endTime, splitPart: 2,
+            leftCount: 1, rightCount: 0,
           });
         } else {
           cards.push({
             event, loopDayIdx, startLoopRel, endLoopRel,
             segmentStart: undefined, segmentEnd: undefined, splitPart: 0,
+            leftCount: 0, rightCount: 0,
           });
         }
 
@@ -269,11 +273,15 @@ export default function TemplateEditor({ templateId, onBack }) {
           segStart = undefined; segEnd = undefined;
         }
 
+        const spanStartIdx = loopDays.findIndex((d) => d.dayName === event.startDay);
+        const spanEndIdx   = loopDays.findIndex((d) => d.dayName === event.endDay);
         cards.push({
           event, loopDayIdx,
           startLoopRel: cardStartRel, endLoopRel: cardEndRel,
           segmentStart: segStart, segmentEnd: segEnd,
           splitPart: 0,
+          leftCount: loopDayIdx - spanStartIdx,
+          rightCount: spanEndIdx - loopDayIdx,
         });
       }
     }
@@ -301,8 +309,13 @@ export default function TemplateEditor({ templateId, onBack }) {
     setFormState(null);
   }
 
-  function handleDelete(eventId) {
-    dispatch({ type: 'DELETE_EVENT', templateId, eventId });
+  function handleDelete(eventId, dayName) {
+    const event = template.events.find((e) => e.id === eventId);
+    if ((event.type ?? 'recurring') === 'recurring' && event.days.length > 1) {
+      setPendingDelete({ event, day: dayName });
+    } else {
+      dispatch({ type: 'DELETE_EVENT', templateId, eventId });
+    }
   }
 
   function handleColumnClick(e, dayName) {
@@ -481,8 +494,12 @@ export default function TemplateEditor({ templateId, onBack }) {
                         event={card.event}
                         segmentStart={card.segmentStart}
                         segmentEnd={card.segmentEnd}
+                        clippedTop={card.startLoopRel < visTopMins}
+                        clippedBottom={card.endLoopRel > visBottomMins}
+                        leftCount={card.leftCount}
+                        rightCount={card.rightCount}
                         onEdit={(e) => setFormState(e)}
-                        onDelete={handleDelete}
+                        onDelete={(eventId) => handleDelete(eventId, loopDays[card.loopDayIdx].dayName)}
                       />
                     </div>
                   );
@@ -520,6 +537,37 @@ export default function TemplateEditor({ templateId, onBack }) {
           onSave={handleSave}
           onClose={() => setFormState(null)}
         />
+      )}
+
+      {/* Delete recurring event modal */}
+      {pendingDelete && (
+        <Modal title="Delete recurring event" onClose={() => setPendingDelete(null)}>
+          <p className="text-sm text-gray-600 mb-5">
+            <strong>{pendingDelete.event.title || 'This event'}</strong> repeats on multiple days.
+            Do you want to remove it from <strong>{DAY_LABELS[pendingDelete.day]}</strong> only, or delete the entire series?
+          </p>
+          <div className="flex justify-end gap-2">
+            <Button variant="secondary" onClick={() => setPendingDelete(null)}>Cancel</Button>
+            <Button
+              variant="secondary"
+              onClick={() => {
+                dispatch({ type: 'REMOVE_EVENT_DAY', templateId, eventId: pendingDelete.event.id, day: pendingDelete.day });
+                setPendingDelete(null);
+              }}
+            >
+              {DAY_LABELS[pendingDelete.day]} only
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                dispatch({ type: 'DELETE_EVENT', templateId, eventId: pendingDelete.event.id });
+                setPendingDelete(null);
+              }}
+            >
+              Delete series
+            </Button>
+          </div>
+        </Modal>
       )}
 
       {/* Settings modal */}

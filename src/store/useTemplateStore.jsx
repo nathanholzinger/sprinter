@@ -57,6 +57,23 @@ function reducer(state, action) {
         ),
       };
     }
+    case 'REMOVE_EVENT_DAY': {
+      return {
+        ...state,
+        templates: state.templates.map((t) =>
+          t.id === action.templateId
+            ? {
+                ...t,
+                events: t.events.map((e) =>
+                  e.id === action.eventId
+                    ? { ...e, days: e.days.filter((d) => d !== action.day) }
+                    : e
+                ),
+              }
+            : t
+        ),
+      };
+    }
     case 'DELETE_EVENT': {
       return {
         ...state,
