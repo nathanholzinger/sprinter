@@ -76,6 +76,58 @@ function getSpanDayNames(event, loopDays) {
   return loopDays.slice(startIdx, endIdx + 1).map((d) => d.dayName);
 }
 
+/**
+ * Assign colIdx and numCols to each card for side-by-side overlap rendering.
+ * Mutates cards in-place; safe because cards are freshly created each render.
+ */
+function computeOverlapLayout(cards) {
+  if (cards.length === 0) return cards;
+
+  cards.sort((a, b) =>
+    a.startLoopRel !== b.startLoopRel
+      ? a.startLoopRel - b.startLoopRel
+      : a.endLoopRel - b.endLoopRel
+  );
+
+  const clusters = [];
+  let current = [];
+  let maxEnd = -Infinity;
+
+  for (const card of cards) {
+    if (current.length > 0 && card.startLoopRel >= maxEnd) {
+      clusters.push(current);
+      current = [];
+      maxEnd = -Infinity;
+    }
+    current.push(card);
+    if (card.endLoopRel > maxEnd) maxEnd = card.endLoopRel;
+  }
+  if (current.length > 0) clusters.push(current);
+
+  for (const cluster of clusters) {
+    const laneEnds = [];
+    for (const card of cluster) {
+      let placed = false;
+      for (let i = 0; i < laneEnds.length; i++) {
+        if (laneEnds[i] <= card.startLoopRel) {
+          card.colIdx = i;
+          laneEnds[i] = card.endLoopRel;
+          placed = true;
+          break;
+        }
+      }
+      if (!placed) {
+        card.colIdx = laneEnds.length;
+        laneEnds.push(card.endLoopRel);
+      }
+    }
+    const numCols = laneEnds.length;
+    for (const card of cluster) card.numCols = numCols;
+  }
+
+  return cards;
+}
+
 function formatClockHour(clockH) {
   const h = ((clockH % 24) + 24) % 24;
   if (h === 0) return '12 AM';
@@ -229,13 +281,14 @@ export default function TemplateEditor({ templateId, onBack }) {
     return cards;
   }
 
-  // Distribute all cards into per-column buckets.
+  // Distribute all cards into per-column buckets, then assign overlap layout.
   const cardsByLoopDay = Array.from({ length: 7 }, () => []);
   for (const loopDay of loopDays) {
     for (const card of getCardsForLoopDay(loopDay)) {
       cardsByLoopDay[card.loopDayIdx].push(card);
     }
   }
+  cardsByLoopDay.forEach(computeOverlapLayout);
 
   // ── Event handlers ─────────────────────────────────────────────────────────
 
@@ -415,7 +468,13 @@ export default function TemplateEditor({ templateId, onBack }) {
                     <div
                       key={`${card.event.id}-${card.splitPart}`}
                       className="absolute"
-                      style={{ top: top + 1, height: height - 2, left: 3, right: 3, zIndex: 1 }}
+                      style={{
+                        top: top + 1,
+                        height: height - 2,
+                        left: `calc(${(card.colIdx / card.numCols) * 100}% + 2px)`,
+                        width: `calc(${(1 / card.numCols) * 100}% - 4px)`,
+                        zIndex: 1,
+                      }}
                       onClick={(e) => e.stopPropagation()}
                     >
                       <EventCard
