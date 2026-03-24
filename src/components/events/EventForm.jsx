@@ -9,12 +9,20 @@ const DAY_LABELS = {
   thursday: 'Thu', friday: 'Fri', saturday: 'Sat', sunday: 'Sun',
 };
 
-export default function EventForm({ initialEvent, defaultDay, defaultStartTime, defaultEndTime, loopDays, onSave, onClose }) {
-  const initialType = initialEvent?.type ?? 'recurring';
+export default function EventForm({ initialEvent, defaultDay, defaultStartTime, defaultEndTime, defaultType, defaultSpanStartDay, defaultSpanEndDay, loopDays, onSave, onClose }) {
+  const initialType = initialEvent?.type ?? defaultType ?? 'recurring';
   const [eventType, setEventType] = useState(initialType);
 
   const [form, setForm] = useState(() => {
     if (initialEvent) return { ...initialEvent };
+    if (initialType === 'span') {
+      return createSpanEvent({
+        startDay: defaultSpanStartDay ?? loopDays[0].dayName,
+        endDay:   defaultSpanEndDay   ?? defaultSpanStartDay ?? loopDays[0].dayName,
+        ...(defaultStartTime && { startTime: defaultStartTime }),
+        ...(defaultEndTime   && { endTime:   defaultEndTime   }),
+      });
+    }
     return createEvent({
       days: [defaultDay ?? loopDays[0].dayName],
       ...(defaultStartTime && { startTime: defaultStartTime }),

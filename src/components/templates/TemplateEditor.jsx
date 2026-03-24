@@ -1,4 +1,4 @@
-import { useState, Fragment } from 'react';
+import { useState, useRef, useEffect, useLayoutEffect, Fragment } from 'react';
 import Button from '../ui/Button';
 import Modal from '../ui/Modal';
 import EventCard from '../events/EventCard';
@@ -157,12 +157,117 @@ export default function TemplateEditor({ templateId, onBack }) {
   const [formState, setFormState] = useState(null);
   const [pendingDelete, setPendingDelete] = useState(null); // { event, day } | null
   const [settingsOpen, setSettingsOpen] = useState(false);
+
+  // ── Drag-to-create ───────────────────────────────────────────────────────
+  const dragAnchorRef  = useRef(null); // { loopDayIdx, loopRelMins, startClientX, startClientY }
+  const dragPreviewRef = useRef(null); // normalised { startDayIdx, startLoopRelMins, endDayIdx, endLoopRelMins }
+  const [dragPreview, setDragPreview] = useState(null);
+
+  // Always-fresh render-time values for the stable useEffect closure
+  const dragCtx = useRef({});
+
+  useEffect(() => {
+    const THRESHOLD = 8; // px before drag activates
+
+    function colRelMins(clientY, colEl, ctx) {
+      const rect = colEl.getBoundingClientRect();
+      return ctx.displayStart * 60 + Math.max(0, Math.min(clientY - rect.top, ctx.totalHeight));
+    }
+
+    function onMouseMove(e) {
+      if (!dragAnchorRef.current) return;
+      const anchor = dragAnchorRef.current;
+      const dy = e.clientY - anchor.startClientY;
+      const dx = e.clientX - anchor.startClientX;
+      if (!dragPreviewRef.current && Math.abs(dy) < THRESHOLD && Math.abs(dx) < 10) return;
+
+      const ctx = dragCtx.current;
+      const colEl = document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-day-idx]');
+      if (!colEl) return;
+
+      const endDayIdx     = Number(colEl.dataset.dayIdx);
+      const endRelMins    = colRelMins(e.clientY, colEl, ctx);
+      const anchorColEl   = document.querySelector(`[data-day-idx="${anchor.loopDayIdx}"]`);
+      const startRelMins  = anchorColEl ? colRelMins(anchor.startClientY, anchorColEl, ctx) : anchor.loopRelMins;
+
+      // Normalise: start ≤ end (by day index, then by time)
+      let [sDayIdx, sRel, eDayIdx, eRel] = [anchor.loopDayIdx, startRelMins, endDayIdx, endRelMins];
+      if (eDayIdx < sDayIdx || (eDayIdx === sDayIdx && eRel < sRel)) {
+        [sDayIdx, eDayIdx] = [eDayIdx, sDayIdx];
+        [sRel,    eRel]    = [eRel,    sRel];
+      }
+
+      const preview = { startDayIdx: sDayIdx, startLoopRelMins: sRel, endDayIdx: eDayIdx, endLoopRelMins: eRel };
+      dragPreviewRef.current = preview;
+      setDragPreview({ ...preview });
+    }
+
+    function onMouseUp(e) {
+      if (!dragAnchorRef.current) return;
+      const anchor  = dragAnchorRef.current;
+      const preview = dragPreviewRef.current;
+      dragAnchorRef.current  = null;
+      dragPreviewRef.current = null;
+      setDragPreview(null);
+
+      const ctx = dragCtx.current;
+
+      if (!preview) {
+        // Plain click — use anchor position
+        if (e.target.closest('[data-event-card]')) return;
+        const clockMins = (anchor.loopRelMins + ctx.loopDayStart * 60) % (24 * 60);
+        const rounded   = Math.round(clockMins / 15) * 15 % (24 * 60);
+        ctx.setFormState({
+          defaultDay: ctx.loopDays[anchor.loopDayIdx].dayName,
+          startTime:  minsToTimeStr(rounded),
+          endTime:    minsToTimeStr((rounded + 60) % (24 * 60)),
+        });
+        return;
+      }
+
+      const toRounded = (loopRelMins) => {
+        const clockMins = (loopRelMins + ctx.loopDayStart * 60) % (24 * 60);
+        return minsToTimeStr(Math.round(clockMins / 15) * 15 % (24 * 60));
+      };
+      const startTime = toRounded(preview.startLoopRelMins);
+      const endTime   = toRounded(preview.endLoopRelMins);
+
+      if (preview.startDayIdx === preview.endDayIdx) {
+        ctx.setFormState({
+          defaultDay: ctx.loopDays[preview.startDayIdx].dayName,
+          startTime,
+          endTime,
+        });
+      } else {
+        ctx.setFormState({
+          defaultType:         'span',
+          defaultSpanStartDay: ctx.loopDays[preview.startDayIdx].dayName,
+          defaultSpanEndDay:   ctx.loopDays[preview.endDayIdx].dayName,
+          startTime,
+          endTime,
+        });
+      }
+    }
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup',   onMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup',   onMouseUp);
+    };
+  }, []); // stable — reads live values through dragCtx ref
   const [settingsForm, setSettingsForm] = useState({ typicalDayStart, typicalDayEnd, loopWeekStart });
 
   // ── Derived display values ─────────────────────────────────────────────────
 
   const totalHeight = (displayEnd - displayStart) * 60; // 1px per minute
   const windowSize  = displayEnd - displayStart;
+
+  // Keep dragCtx fresh after every render (useLayoutEffect avoids the
+  // react-hooks/refs rule that disallows ref writes during render)
+  useLayoutEffect(() => {
+    dragCtx.current = { loopDayStart, loopDays, displayStart, totalHeight, setFormState };
+  }, [loopDayStart, loopDays, displayStart, totalHeight, setFormState]);
 
   // loop-relative hour → clock hour
   const loopRelToClockHour = (relH) => (relH + loopDayStart) % 24;
@@ -318,23 +423,18 @@ export default function TemplateEditor({ templateId, onBack }) {
     }
   }
 
-  function getTimeFromClickY(e) {
+  function handleColumnMouseDown(e, colIdx) {
+    if (e.button !== 0) return;
+    if (e.target.closest('[data-event-card]')) return;
+    e.preventDefault(); // prevent text selection during drag
     const rect = e.currentTarget.getBoundingClientRect();
     const relY = Math.max(0, Math.min(e.clientY - rect.top, totalHeight));
-    // 1 px = 1 loop-relative minute; convert to clock minutes and round to 15
-    const loopRelMins = displayStart * 60 + relY;
-    const clockMins   = (loopRelMins + loopDayStart * 60) % (24 * 60);
-    const rounded     = Math.round(clockMins / 15) * 15 % (24 * 60);
-    return {
-      startTime: minsToTimeStr(rounded),
-      endTime:   minsToTimeStr((rounded + 60) % (24 * 60)),
+    dragAnchorRef.current = {
+      loopDayIdx:   colIdx,
+      loopRelMins:  displayStart * 60 + relY,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
     };
-  }
-
-  function handleColumnClick(e, dayName) {
-    if (e.target.closest('[data-event-card]')) return;
-    const { startTime, endTime } = getTimeFromClickY(e);
-    setFormState({ defaultDay: dayName, startTime, endTime });
   }
 
   function handleSettingsSave() {
@@ -455,9 +555,10 @@ export default function TemplateEditor({ templateId, onBack }) {
             {loopDays.map((ld, colIdx) => (
               <div
                 key={ld.dayName}
-                className="relative cursor-pointer"
+                data-day-idx={colIdx}
+                className={`relative select-none ${dragPreview ? 'cursor-crosshair' : 'cursor-pointer'}`}
                 style={{ height: totalHeight }}
-                onClick={(e) => handleColumnClick(e, ld.dayName)}
+                onMouseDown={(e) => handleColumnMouseDown(e, colIdx)}
               >
                 {/* Hour overlays + grid lines */}
                 {hourTicks.map((relH) => {
@@ -477,6 +578,28 @@ export default function TemplateEditor({ templateId, onBack }) {
                     </Fragment>
                   );
                 })}
+
+                {/* Drag-to-create ghost preview */}
+                {dragPreview && colIdx >= dragPreview.startDayIdx && colIdx <= dragPreview.endDayIdx && (() => {
+                  const { startDayIdx, startLoopRelMins, endDayIdx, endLoopRelMins } = dragPreview;
+                  const isSingle = startDayIdx === endDayIdx;
+                  const ghostStart = isSingle || colIdx === startDayIdx ? startLoopRelMins : 0;
+                  const ghostEnd   = isSingle || colIdx === endDayIdx   ? endLoopRelMins   : 24 * 60;
+                  const visTop     = displayStart * 60;
+                  const visBottom  = displayEnd * 60;
+                  const rStart = Math.max(visTop, ghostStart);
+                  const rEnd   = Math.min(visBottom, ghostEnd);
+                  if (rStart >= rEnd) return null;
+                  return (
+                    <div
+                      key="ghost"
+                      className="absolute pointer-events-none"
+                      style={{ top: rStart - visTop + 1, height: Math.max(rEnd - rStart, MIN_EVENT_HEIGHT) - 2, left: 2, right: 2, zIndex: 2 }}
+                    >
+                      <div className="h-full rounded-lg border-2 border-dashed border-blue-400 bg-blue-100/50" />
+                    </div>
+                  );
+                })()}
 
                 {/* Event cards */}
                 {cardsByLoopDay[colIdx].map((card) => {
@@ -549,6 +672,9 @@ export default function TemplateEditor({ templateId, onBack }) {
           defaultDay={formState.defaultDay ?? formState.days?.[0] ?? loopDays[0].dayName}
           defaultStartTime={formState.startTime}
           defaultEndTime={formState.endTime}
+          defaultType={formState.defaultType}
+          defaultSpanStartDay={formState.defaultSpanStartDay}
+          defaultSpanEndDay={formState.defaultSpanEndDay}
           loopDays={loopDays}
           onSave={handleSave}
           onClose={() => setFormState(null)}
