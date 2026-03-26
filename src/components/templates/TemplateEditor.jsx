@@ -4,7 +4,7 @@ import Modal from '../ui/Modal';
 import EventCard from '../events/EventCard';
 import EventForm from '../events/EventForm';
 import SettingsModal from './SettingsModal';
-import { useTemplateStore } from '../../store/useTemplateStore';
+import { useTemplateStore, createEvent } from '../../store/useTemplateStore';
 import {
   DAY_LABELS,
   computeLoopDayStart, buildLoopDays,
@@ -12,6 +12,7 @@ import {
   formatClockHour,
 } from '../../lib/calendarUtils';
 import { useDragToCreate } from '../../hooks/useDragToCreate';
+import { useDragToMove } from '../../hooks/useDragToMove';
 import { useCardLayout } from '../../hooks/useCardLayout';
 
 const MIN_EVENT_HEIGHT = 24; // px
@@ -38,6 +39,7 @@ export default function TemplateEditor({ templateId, onBack }) {
 
   const [formState, setFormState] = useState(null);
   const [pendingDelete, setPendingDelete] = useState(null); // { event, day } | null
+  const [pendingMove, setPendingMove] = useState(null);     // { card, targetColIdx, newStartTime, newEndTime } | null
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // ── Derived display values ─────────────────────────────────────────────────
@@ -48,6 +50,22 @@ export default function TemplateEditor({ templateId, onBack }) {
   // ── Drag-to-create ────────────────────────────────────────────────────────
   const { dragPreview, handleColumnMouseDown } = useDragToCreate({
     loopDayStart, loopDays, displayStart, totalHeight, setFormState,
+  });
+
+  // ── Drag-to-move ──────────────────────────────────────────────────────────
+
+  function handleCardMove(card, targetColIdx, newStartTime, newEndTime) {
+    const event = card.event;
+    if ((event.type ?? 'recurring') !== 'recurring') return;
+    if (event.days.length > 1) {
+      setPendingMove({ card, targetColIdx, newStartTime, newEndTime });
+    } else {
+      dispatch({ type: 'UPDATE_EVENT', templateId, event: { ...event, startTime: newStartTime, endTime: newEndTime, days: [loopDays[targetColIdx].dayName] } });
+    }
+  }
+
+  const { draggingKey, dragMovePreview, handleCardMouseDown } = useDragToMove({
+    loopDayStart, loopDays, displayStart, totalHeight, onMove: handleCardMove,
   });
 
   // loop-relative hour → clock hour
@@ -218,7 +236,7 @@ export default function TemplateEditor({ templateId, onBack }) {
               <div
                 key={ld.dayName}
                 data-day-idx={colIdx}
-                className={`relative select-none ${dragPreview ? 'cursor-crosshair' : 'cursor-pointer'}`}
+                className={`relative select-none ${draggingKey ? 'cursor-grabbing' : dragPreview ? 'cursor-crosshair' : 'cursor-pointer'}`}
                 style={{ height: totalHeight }}
                 onMouseDown={(e) => handleColumnMouseDown(e, colIdx)}
               >
@@ -263,6 +281,29 @@ export default function TemplateEditor({ templateId, onBack }) {
                   );
                 })()}
 
+                {/* Drag-to-move ghost */}
+                {dragMovePreview && dragMovePreview.colIdx === colIdx && (() => {
+                  const { startLoopRelMins, endLoopRelMins, event } = dragMovePreview;
+                  const visTop    = displayStart * 60;
+                  const visBottom = displayEnd   * 60;
+                  const rStart = Math.max(visTop, startLoopRelMins);
+                  const rEnd   = Math.min(visBottom, endLoopRelMins);
+                  if (rStart >= rEnd) return null;
+                  return (
+                    <div
+                      key="move-ghost"
+                      className="absolute pointer-events-none"
+                      style={{ top: rStart - visTop + 1, height: Math.max(rEnd - rStart, MIN_EVENT_HEIGHT) - 2, left: 2, right: 2, zIndex: 3 }}
+                    >
+                      <div className="h-full rounded-lg border-2 border-blue-400 bg-blue-200/70 shadow-md flex flex-col px-2 py-1 overflow-hidden">
+                        <span className="truncate text-xs font-semibold text-blue-900 leading-snug">
+                          {event.title || <span className="italic text-blue-500">Untitled</span>}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* Event cards */}
                 {cardsByLoopDay[colIdx].map((card) => {
                   const visTopMins    = displayStart * 60;
@@ -275,11 +316,12 @@ export default function TemplateEditor({ templateId, onBack }) {
 
                   const top    = renderStart - visTopMins;
                   const height = Math.max(renderEnd - renderStart, MIN_EVENT_HEIGHT);
+                  const isDraggable = (card.event.type ?? 'recurring') !== 'span' && card.splitPart === 0;
 
                   return (
                     <div
                       key={`${card.event.id}-${card.splitPart}`}
-                      className="absolute"
+                      className={`absolute ${isDraggable ? 'cursor-grab' : ''}`}
                       style={{
                         top: top + 1,
                         height: height - 2,
@@ -287,6 +329,7 @@ export default function TemplateEditor({ templateId, onBack }) {
                         width: `calc(${(1 / card.numCols) * 100}% - 4px)`,
                         zIndex: 1,
                       }}
+                      onMouseDown={(e) => handleCardMouseDown(e, card, colIdx)}
                       onClick={(e) => e.stopPropagation()}
                     >
                       <EventCard
@@ -297,6 +340,7 @@ export default function TemplateEditor({ templateId, onBack }) {
                         clippedBottom={card.endLoopRel > visBottomMins}
                         leftCount={card.leftCount}
                         rightCount={card.rightCount}
+                        dragging={draggingKey === `${card.event.id}-${card.splitPart}`}
                         onEdit={(e) => setFormState(e)}
                         onDelete={(eventId) => handleDelete(eventId, loopDays[card.loopDayIdx].dayName)}
                       />
@@ -373,6 +417,43 @@ export default function TemplateEditor({ templateId, onBack }) {
           </div>
         </Modal>
       )}
+
+      {/* Move recurring event modal */}
+      {pendingMove && (() => {
+        const { card, targetColIdx, newStartTime, newEndTime } = pendingMove;
+        const event   = card.event;
+        const dayName = loopDays[card.loopDayIdx].dayName;
+        return (
+          <Modal title="Move recurring event" onClose={() => setPendingMove(null)}>
+            <p className="text-sm text-gray-600 mb-5">
+              <strong>{event.title || 'This event'}</strong> repeats on multiple days.
+              Do you want to move <strong>{DAY_LABELS[dayName]}</strong> only to{' '}
+              <strong>{newStartTime} – {newEndTime}</strong>, or move the entire series?
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setPendingMove(null)}>Cancel</Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  dispatch({ type: 'REMOVE_EVENT_DAY', templateId, eventId: event.id, day: dayName });
+                  dispatch({ type: 'ADD_EVENT', templateId, event: createEvent({ title: event.title, notes: event.notes, days: [loopDays[targetColIdx].dayName], startTime: newStartTime, endTime: newEndTime }) });
+                  setPendingMove(null);
+                }}
+              >
+                {DAY_LABELS[dayName]} only
+              </Button>
+              <Button
+                onClick={() => {
+                  dispatch({ type: 'UPDATE_EVENT', templateId, event: { ...event, startTime: newStartTime, endTime: newEndTime } });
+                  setPendingMove(null);
+                }}
+              >
+                Move all days
+              </Button>
+            </div>
+          </Modal>
+        );
+      })()}
 
       {/* Settings modal */}
       {settingsOpen && (

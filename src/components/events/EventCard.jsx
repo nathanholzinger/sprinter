@@ -1,4 +1,4 @@
-export default function EventCard({ event, segmentStart, segmentEnd, clippedTop, clippedBottom, leftCount, rightCount, onEdit, onDelete }) {
+export default function EventCard({ event, segmentStart, segmentEnd, clippedTop, clippedBottom, leftCount, rightCount, onEdit, onDelete, dragging }) {
   const displayStart = segmentStart ?? event.startTime;
   const displayEnd = segmentEnd ?? event.endTime;
   const isSegment = segmentStart !== undefined || segmentEnd !== undefined;
@@ -11,7 +11,7 @@ export default function EventCard({ event, segmentStart, segmentEnd, clippedTop,
   return (
     <div
       data-event-card
-      className="group relative flex h-full flex-col overflow-hidden rounded-lg border border-blue-200 bg-blue-50 text-left shadow-sm hover:border-blue-400 hover:shadow transition-all"
+      className={`group relative flex h-full flex-col overflow-hidden rounded-lg border border-blue-200 bg-blue-50 text-left shadow-sm hover:border-blue-400 hover:shadow transition-all ${dragging ? 'opacity-40' : ''}`}
       title={isSegment ? `${fullTime} (full event)` : fullTime}
     >
       {/* Top banner: ← +N (prev days) and/or ↑ (clipped above) */}
