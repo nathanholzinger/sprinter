@@ -1,4 +1,4 @@
-export default function EventCard({ event, segmentStart, segmentEnd, clippedTop, clippedBottom, leftCount, rightCount, onEdit, onDelete, dragging }) {
+export default function EventCard({ event, segmentStart, segmentEnd, clippedTop, clippedBottom, leftCount, rightCount, onEdit, onDelete, dragging, resizable }) {
   const displayStart = segmentStart ?? event.startTime;
   const displayEnd = segmentEnd ?? event.endTime;
   const isSegment = segmentStart !== undefined || segmentEnd !== undefined;
@@ -60,6 +60,14 @@ export default function EventCard({ event, segmentStart, segmentEnd, clippedTop,
             </span>
           ) : <span />}
         </div>
+      )}
+
+      {/* Resize handles — visible on hover, only for resizable (non-span, non-split) cards */}
+      {resizable && (
+        <>
+          <div data-resize-handle="top"    className="absolute top-0    left-0 right-0 h-1.5 cursor-ns-resize rounded-t-lg z-10 group-hover:bg-blue-400/40 transition-colors" />
+          <div data-resize-handle="bottom" className="absolute bottom-0 left-0 right-0 h-1.5 cursor-ns-resize rounded-b-lg z-10 group-hover:bg-blue-400/40 transition-colors" />
+        </>
       )}
 
       {/* Edit / delete buttons */}

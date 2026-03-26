@@ -13,6 +13,7 @@ import {
 } from '../../lib/calendarUtils';
 import { useDragToCreate } from '../../hooks/useDragToCreate';
 import { useDragToMove } from '../../hooks/useDragToMove';
+import { useDragToResize } from '../../hooks/useDragToResize';
 import { useCardLayout } from '../../hooks/useCardLayout';
 
 const MIN_EVENT_HEIGHT = 24; // px
@@ -40,6 +41,7 @@ export default function TemplateEditor({ templateId, onBack }) {
   const [formState, setFormState] = useState(null);
   const [pendingDelete, setPendingDelete] = useState(null); // { event, day } | null
   const [pendingMove, setPendingMove] = useState(null);     // { card, targetColIdx, newStartTime, newEndTime } | null
+  const [pendingResize, setPendingResize] = useState(null); // { card, newStartTime, newEndTime } | null
   const [settingsOpen, setSettingsOpen] = useState(false);
 
   // ── Derived display values ─────────────────────────────────────────────────
@@ -66,6 +68,22 @@ export default function TemplateEditor({ templateId, onBack }) {
 
   const { draggingKey, dragMovePreview, handleCardMouseDown } = useDragToMove({
     loopDayStart, loopDays, displayStart, totalHeight, onMove: handleCardMove,
+  });
+
+  // ── Drag-to-resize ────────────────────────────────────────────────────────
+
+  function handleCardResize(card, newStartTime, newEndTime) {
+    const event = card.event;
+    if ((event.type ?? 'recurring') !== 'recurring') return;
+    if (event.days.length > 1) {
+      setPendingResize({ card, newStartTime, newEndTime });
+    } else {
+      dispatch({ type: 'UPDATE_EVENT', templateId, event: { ...event, startTime: newStartTime, endTime: newEndTime } });
+    }
+  }
+
+  const { resizingKey, resizePreview, handleResizeMouseDown } = useDragToResize({
+    loopDayStart, loopDays, displayStart, totalHeight, onResize: handleCardResize,
   });
 
   // loop-relative hour → clock hour
@@ -236,7 +254,7 @@ export default function TemplateEditor({ templateId, onBack }) {
               <div
                 key={ld.dayName}
                 data-day-idx={colIdx}
-                className={`relative select-none ${draggingKey ? 'cursor-grabbing' : dragPreview ? 'cursor-crosshair' : 'cursor-pointer'}`}
+                className={`relative select-none ${draggingKey ? 'cursor-grabbing' : resizingKey ? 'cursor-ns-resize' : dragPreview ? 'cursor-crosshair' : 'cursor-pointer'}`}
                 style={{ height: totalHeight }}
                 onMouseDown={(e) => handleColumnMouseDown(e, colIdx)}
               >
@@ -304,6 +322,29 @@ export default function TemplateEditor({ templateId, onBack }) {
                   );
                 })()}
 
+                {/* Drag-to-resize ghost */}
+                {resizePreview && resizePreview.colIdx === colIdx && (() => {
+                  const { startLoopRelMins, endLoopRelMins, event } = resizePreview;
+                  const visTop    = displayStart * 60;
+                  const visBottom = displayEnd   * 60;
+                  const rStart = Math.max(visTop, startLoopRelMins);
+                  const rEnd   = Math.min(visBottom, endLoopRelMins);
+                  if (rStart >= rEnd) return null;
+                  return (
+                    <div
+                      key="resize-ghost"
+                      className="absolute pointer-events-none"
+                      style={{ top: rStart - visTop + 1, height: Math.max(rEnd - rStart, MIN_EVENT_HEIGHT) - 2, left: 2, right: 2, zIndex: 3 }}
+                    >
+                      <div className="h-full rounded-lg border-2 border-blue-400 bg-blue-200/70 shadow-md flex flex-col px-2 py-1 overflow-hidden">
+                        <span className="truncate text-xs font-semibold text-blue-900 leading-snug">
+                          {event.title || <span className="italic text-blue-500">Untitled</span>}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* Event cards */}
                 {cardsByLoopDay[colIdx].map((card) => {
                   const visTopMins    = displayStart * 60;
@@ -316,11 +357,12 @@ export default function TemplateEditor({ templateId, onBack }) {
 
                   const top    = renderStart - visTopMins;
                   const height = Math.max(renderEnd - renderStart, MIN_EVENT_HEIGHT);
+                  const cardKey     = `${card.event.id}-${card.splitPart}`;
                   const isDraggable = (card.event.type ?? 'recurring') !== 'span' && card.splitPart === 0;
 
                   return (
                     <div
-                      key={`${card.event.id}-${card.splitPart}`}
+                      key={cardKey}
                       className={`absolute ${isDraggable ? 'cursor-grab' : ''}`}
                       style={{
                         top: top + 1,
@@ -329,7 +371,14 @@ export default function TemplateEditor({ templateId, onBack }) {
                         width: `calc(${(1 / card.numCols) * 100}% - 4px)`,
                         zIndex: 1,
                       }}
-                      onMouseDown={(e) => handleCardMouseDown(e, card, colIdx)}
+                      onMouseDown={(e) => {
+                        const resizeHandle = e.target.closest('[data-resize-handle]');
+                        if (resizeHandle) {
+                          handleResizeMouseDown(e, card, colIdx, resizeHandle.dataset.resizeHandle);
+                        } else {
+                          handleCardMouseDown(e, card, colIdx);
+                        }
+                      }}
                       onClick={(e) => e.stopPropagation()}
                     >
                       <EventCard
@@ -340,7 +389,8 @@ export default function TemplateEditor({ templateId, onBack }) {
                         clippedBottom={card.endLoopRel > visBottomMins}
                         leftCount={card.leftCount}
                         rightCount={card.rightCount}
-                        dragging={draggingKey === `${card.event.id}-${card.splitPart}`}
+                        dragging={draggingKey === cardKey || resizingKey === cardKey}
+                        resizable={isDraggable}
                         onEdit={(e) => setFormState(e)}
                         onDelete={(eventId) => handleDelete(eventId, loopDays[card.loopDayIdx].dayName)}
                       />
@@ -449,6 +499,43 @@ export default function TemplateEditor({ templateId, onBack }) {
                 }}
               >
                 Move all days
+              </Button>
+            </div>
+          </Modal>
+        );
+      })()}
+
+      {/* Resize recurring event modal */}
+      {pendingResize && (() => {
+        const { card, newStartTime, newEndTime } = pendingResize;
+        const event   = card.event;
+        const dayName = loopDays[card.loopDayIdx].dayName;
+        return (
+          <Modal title="Resize recurring event" onClose={() => setPendingResize(null)}>
+            <p className="text-sm text-gray-600 mb-5">
+              <strong>{event.title || 'This event'}</strong> repeats on multiple days.
+              Do you want to adjust <strong>{DAY_LABELS[dayName]}</strong> only to{' '}
+              <strong>{newStartTime} – {newEndTime}</strong>, or adjust the entire series?
+            </p>
+            <div className="flex justify-end gap-2">
+              <Button variant="secondary" onClick={() => setPendingResize(null)}>Cancel</Button>
+              <Button
+                variant="secondary"
+                onClick={() => {
+                  dispatch({ type: 'REMOVE_EVENT_DAY', templateId, eventId: event.id, day: dayName });
+                  dispatch({ type: 'ADD_EVENT', templateId, event: createEvent({ title: event.title, notes: event.notes, days: [dayName], startTime: newStartTime, endTime: newEndTime }) });
+                  setPendingResize(null);
+                }}
+              >
+                {DAY_LABELS[dayName]} only
+              </Button>
+              <Button
+                onClick={() => {
+                  dispatch({ type: 'UPDATE_EVENT', templateId, event: { ...event, startTime: newStartTime, endTime: newEndTime } });
+                  setPendingResize(null);
+                }}
+              >
+                Adjust all days
               </Button>
             </div>
           </Modal>
